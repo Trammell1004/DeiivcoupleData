@@ -1,0 +1,717 @@
+
+Here's the breakdown with example code:
+
+1. app/__init__.py
+
+"""TextNow Clone - Application Package."""
+2. app/main.py
+
+"""
+FastAPI entrypoint for the TextNow Clone application.
+"""
+
+from fastapi import FastAPI
+from . import models
+from .database import engine
+from .routers import users, messages, calls  # Import routers
+
+models.Base.metadata.create_all(bind=engine)
+
+app = FastAPI(
+    title="TextNow Clone",
+    description="A simple TextNow clone built with FastAPI.",
+    version="0.1.0",
+)
+
+
+@app.get("/")
+async def read_root():
+    """
+    Root endpoint that returns a welcome message.
+    """
+    return {"Hello": "World"}
+
+
+# Include routers
+app.include_router(users.router)
+app.include_router(messages.router)
+app.include_router(calls.router)
+3. app/models.py
+
+"""
+SQLAlchemy models for the TextNow Clone application.
+"""
+
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, String, DateTime
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from .database import Base
+
+
+class User(Base):
+    """
+    SQLAlchemy model for the User table.
+    """
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    email = Column(String, unique=True, index=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    messages_sent = relationship("Message", back_populates="sender", foreign_keys="[Message.sender_id]")
+    messages_received = relationship("Message", back_populates="recipient", foreign_keys="[Message.recipient_id]")
+
+    calls_made = relationship("Call", back_populates="caller")
+    #TODO: Add relationship for calls received
+
+
+class Message(Base):
+    """
+    SQLAlchemy model for the Message table.
+    """
+    __tablename__ = "messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"))
+    recipient_id = Column(Integer, ForeignKey("users.id"))
+    content = Column(String)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    sender = relationship("User", back_populates="messages_sent", foreign_keys=[sender_id])
+    recipient = relationship("User", back_populates="messages_received", foreign_keys=[recipient_id])
+
+
+class Call(Base):
+
+    """
+    SQLAlchemy model for the Call table.
+    """
+    __tablename__ = "calls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    caller_id = Column(Integer, ForeignKey("users.id"))
+    recipient_number =  Column(String) # Or ForeignKey if you want to store this as another user
+    start_time = Column(DateTime(timezone=True), server_default=func.now())
+    end_time = Column(DateTime(timezone=True), nullable=True) #Allow null if the call is not yet ended.
+    duration = Column(Integer, nullable = True)  #Call duration in seconds - may require calculation for a finished call.
+    status = Column(String) #e.g., "ringing", "in-progress", "completed", "failed"
+
+    caller = relationship("User", back_populates="calls_made")  #Only caller side of the relationship is properly modeled
+    #TODO: Add relationship for who received the call.  Potentially via using recipient_number
+4. app/schemas.py
+
+"""
+Pydantic schemas for the TextNow Clone API.
+"""
+
+from pydantic import BaseModel
+from datetime import datetime
+
+class UserBase(BaseModel):
+    """
+    Base schema for User.
+    """
+    username: str
+    email: str
+
+
+class UserCreate(UserBase):
+    """
+    Schema for creating a User.
+    """
+    password: str
+
+
+class User(UserBase):
+    """
+    Schema for a User object.
+    """
+    id: int
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        """
+        Configuration for the User schema.
+        """
+        orm_mode = True
+
+
+class MessageBase(BaseModel):
+    """
+    Base schema for Message.
+    """
+    recipient_id: int
+    content: str
+
+
+class MessageCreate(MessageBase):
+    """
+    Schema for creating a Message.
+    """
+    pass
+
+
+class Message(MessageBase):
+    """
+    Schema for a Message object.
+    """
+    id: int
+    sender_id: int
+    timestamp: datetime
+
+    class Config:
+        """
+        Configuration for the Message schema.
+        """
+        orm_mode = True
+
+class CallBase(BaseModel):
+    """
+    Base schema for Call
+    """
+    recipient_number: str
+
+class CallCreate(CallBase):
+    """
+    Schema for creating a call.  Does not include caller ID (pulled from auth)
+    """
+    pass
+
+class Call(CallBase):
+    """
+    Schema for a Call object
+    """
+    id: int
+    caller_id: int
+    start_time: datetime
+    end_time: datetime | None = None
+    duration: int | None = None
+    status: str
+
+    class Config:
+        orm_mode = True
+5. app/crud.py
+
+"""
+Database operations for the TextNow Clone application.
+"""
+
+from sqlalchemy.orm import Session
+from . import models, schemas
+from .utils import get_password_hash
+
+
+def get_user(db: Session, user_id: int):
+    """
+    Retrieves a user from the database by ID.
+    """
+    return db.query(models.User).filter(models.User.id == user_id).first()
+
+
+def get_user_by_email(db: Session, email: str):
+    """
+    Retrieves a user from the database by email.
+    """
+    return db.query(models.User).filter(models.User.email == email).first()
+
+
+def get_users(db: Session, skip: int = 0, limit: int = 100):
+    """
+    Retrieves a list of users from the database.
+    """
+    return db.query(models.User).offset(skip).limit(limit).all()
+
+
+def create_user(db: Session, user: schemas.UserCreate):
+    """
+    Creates a new user in the database.
+    """
+    hashed_password = get_password_hash(user.password)
+    db_user = models.User(username=user.username, email=user.email, hashed_password=hashed_password)
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+
+def create_user_message(db: Session, message: schemas.MessageCreate, user_id: int):
+    """
+    Creates a new message in the database.
+    """
+    db_message = models.Message(sender_id=user_id, recipient_id=message.recipient_id, content=message.content)
+    db.add(db_message)
+    db.commit()
+    db.refresh(db_message)
+    return db_message
+
+def create_user_call(db:Session, call:schemas.CallCreate, user_id: int):
+    """
+    Creates a new call record in the database
+    """
+    db_call = models.Call(caller_id = user_id, recipient_number = call.recipient_number, status = "ringing") # Initial status
+    db.add(db_call)
+    db.commit()
+    db.refresh(db_call)
+    return db_call
+
+def get_calls(db: Session, skip: int = 0, limit: int = 100):
+    """
+    Retrieves a list of calls from the database.
+    """
+    return db.query(models.Call).offset(skip).limit(limit).all()
+
+def get_messages(db: Session, skip: int = 0, limit: int = 100):
+     """
+     Retrieves a list of messages from the database.
+     """
+     return db.query(models.Message).offset(skip).limit(limit).all()
+6. app/deps.py
+
+"""
+Dependencies for the TextNow Clone application.
+"""
+
+from typing import Generator
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
+from . import crud, models, schemas
+from .database import SessionLocal
+from .config import settings  # Import settings
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+def get_db() -> Generator:
+    """
+    Dependency to get a database session.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+async def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)):
+    """
+    Dependency to get the current user from the token.
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = schemas.TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = crud.get_user_by_email(db, email=token_data.username)  # Changed to email
+    if user is None:
+        raise credentials_exception
+    return user
+
+
+async def get_current_active_user(current_user: models.User = Depends(get_current_user)):
+    """
+    Dependency to get the current active user.
+    """
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+7. app/auth.py
+
+"""
+Authentication logic for the TextNow Clone application.
+"""
+
+from datetime import datetime, timedelta
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
+from . import crud, models, schemas
+from .deps import get_db
+from .utils import verify_password, get_password_hash
+from .config import settings
+
+
+async def authenticate_user(db: Session, form_data: OAuth2PasswordRequestForm):
+    """
+    Authenticates a user based on the provided username and password.
+    """
+    user = crud.get_user_by_email(db, email=form_data.username) # Changed to email to align with get_user_by_email
+    if not user:
+        return False
+    if not verify_password(form_data.password, user.hashed_password):
+        return False
+    return user
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    """
+    Creates a JWT access token.
+    """
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)  # Use settings
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+
+
+from fastapi import APIRouter, Depends
+
+router = APIRouter(
+    prefix="/auth",
+    tags=["auth"],
+)
+
+@router.post("/token")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    """
+    Endpoint to get an access token for a valid user.
+    """
+    user = await authenticate_user(db, form_data)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.email}, expires_delta=access_token_expires  #Using email as subject
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+8. app/sms.py
+
+"""
+SMS logic for the TextNow Clone application.  Integrates with Twilio or Nexmo.
+"""
+
+from twilio.rest import Client
+from .config import settings  # Import settings
+
+#Twilio example;  other SMS gateways will have different interfaces.
+
+def send_sms(to: str, body: str):
+    """
+    Sends an SMS message using Twilio.
+    """
+    account_sid = settings.TWILIO_ACCOUNT_SID
+    auth_token = settings.TWILIO_AUTH_TOKEN
+    twilio_number = settings.TWILIO_PHONE_NUMBER
+
+    client = Client(account_sid, auth_token)
+
+    message = client.messages.create(
+        to=to,
+        from_=twilio_number,
+        body=body
+    )
+
+    return message.sid
+9. app/call.py
+
+"""
+Voice call logic for the TextNow Clone application. Integrates with Twilio, Plivo, or Asterisk.
+"""
+from twilio.twiml.voice_response import VoiceResponse, Dial
+from twilio.rest import Client
+from fastapi import FastAPI, Response, Depends, HTTPException
+from sqlalchemy.orm import Session
+from . import models, schemas, crud
+from .deps import get_db, get_current_user
+from .config import settings
+from fastapi import APIRouter
+
+router = APIRouter(
+    prefix="/calls",
+    tags=["calls"],
+    dependencies=[Depends(get_db), Depends(get_current_user)],
+)
+
+
+#Twilio example
+@router.post("/start")
+async def start_call(call: schemas.CallCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Initiates a voice call using Twilio.
+    Stores the call record in the database.
+    """
+    account_sid = settings.TWILIO_ACCOUNT_SID
+    auth_token = settings.TWILIO_AUTH_TOKEN
+    twilio_number = settings.TWILIO_PHONE_NUMBER
+
+    client = Client(account_sid, auth_token)
+
+    try:
+        db_call = crud.create_user_call(db=db, call=call, user_id=current_user.id)
+
+        call = client.calls.create(
+            to=call.recipient_number,
+            from_=twilio_number,
+            url=f"{settings.BASE_URL}/calls/twilio/voice/{db_call.id}"
+        )
+        return {"message": "Call initiated!", "call_sid": call.sid, "db_call_id": db_call.id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/twilio/voice/{call_id}") #This route needs to be publicly accessible by Twilio (no auth)
+async def twilio_voice(call_id: int, db: Session = Depends(get_db)):
+    """
+    Twilio Voice URL endpoint.  This is what Twilio calls to get instructions.
+    """
+    db_call = db.query(models.Call).filter(models.Call.id == call_id).first()
+    if not db_call:
+       raise HTTPException(status_code=404, detail="Call not found")
+
+    response = VoiceResponse()
+    dial = Dial()
+    dial.number(db_call.recipient_number)  #or the user the call is being routed to.
+    response.append(dial)
+    return Response(content=str(response), media_type="application/xml")
+
+#TODO:  Add routes/logic to handle call status updates from Twilio (recording, ended, etc)
+# and update the call record in the database (duration, status...)
+10. app/utils.py
+
+"""
+Helper utilities for the TextNow Clone application.
+"""
+
+from passlib.context import CryptContext
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def verify_password(plain_password, hashed_password):
+    """
+    Verifies a password against a hash.
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def get_password_hash(password):
+    """
+    Hashes a password.
+    """
+    return pwd_context.hash(password)
+11. app/config.py
+
+"""
+Settings and configurations for the TextNow Clone application.
+"""
+
+from pydantic import BaseSettings
+import os
+
+
+class Settings(BaseSettings):
+    """
+    Settings class to load environment variables.
+    """
+    SECRET_KEY: str = "YOUR_SECRET_KEY"  # Change this in production
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
+    DATABASE_URL: str = "sqlite:///./textnow.db"  # Example SQLite URL
+    # For PostgreSQL, use: "postgresql://user:password@postgresserver/db"
+
+    TWILIO_ACCOUNT_SID: str = ""  # Retrieve from environment or .env
+    TWILIO_AUTH_TOKEN: str = ""  # Retrieve from environment or .env
+    TWILIO_PHONE_NUMBER: str = ""  # Retrieve from environment or .env
+    BASE_URL: str = "http://localhost:8000" # Used for call callbacks.  Must be accessible by Twilio
+
+    class Config:
+        """
+        Configuration for the Settings class.
+        """
+        env_file = ".env" #Load environment variables from a .env file.
+
+settings = Settings()
+12. app/routers/users.py
+
+"""
+API endpoints for user management.
+"""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from .. import crud, models, schemas
+from ..deps import get_db, get_current_active_user
+
+router = APIRouter(
+    prefix="/users",
+    tags=["users"],
+    dependencies=[Depends(get_db)],
+    responses={404: {"description": "Not found"}},
+)
+
+
+@router.post("/", response_model=schemas.User)
+def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    """
+    Create a new user.
+    """
+    db_user = crud.get_user_by_email(db, email=user.email)
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    return crud.create_user(db=db, user=user)
+
+
+@router.get("/me", response_model=schemas.User)
+async def read_users_me(current_user: models.User = Depends(get_current_active_user)):
+    """
+    Get the current user's information.
+    """
+    return current_user
+
+
+@router.get("/{user_id}", response_model=schemas.User)
+def read_user(user_id: int, db: Session = Depends(get_db)):
+    """
+    Get a user by ID.
+    """
+    db_user = crud.get_user(db, user_id=user_id)
+    if db_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return db_user
+13. app/routers/messages.py
+
+"""
+API endpoints for sending and retrieving messages.
+"""
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from .. import crud, models, schemas
+from ..deps import get_db, get_current_active_user
+
+router = APIRouter(
+    prefix="/messages",
+    tags=["messages"],
+    dependencies=[Depends(get_db), Depends(get_current_active_user)],
+    responses={404: {"description": "Not found"}},
+)
+
+
+@router.post("/", response_model=schemas.Message)
+async def create_message(message: schemas.MessageCreate, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_active_user)):
+    """
+    Send a new message.
+    """
+    return crud.create_user_message(db=db, message=message, user_id=current_user.id)
+
+@router.get("/", response_model=list[schemas.Message])
+async def read_messages(skip: int = 0, limit: int = 100, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_active_user)):
+    """
+    Get all messages.  Protected by authentication.
+    """
+
+    messages = crud.get_messages(db, skip=skip, limit=limit)
+    return messages
+14. app/routers/calls.py
+
+"""
+API endpoints for making and managing calls.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from .. import crud, models, schemas
+from ..deps import get_db, get_current_active_user
+from ..call import router as call_router #Import the router from call.py
+router = APIRouter(
+    prefix="/calls",
+    tags=["calls"],
+    dependencies=[Depends(get_db), Depends(get_current_active_user)],
+    responses={404: {"description": "Not found"}},
+)
+
+
+
+
+@router.get("/", response_model=list[schemas.Call])
+async def read_calls(skip: int = 0, limit: int = 100, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_active_user)):
+    """
+    Get all calls.  Protected by authentication.
+    """
+    calls = crud.get_calls(db, skip=skip, limit=limit)
+    return calls
+
+#Include the call router here -- cleaner and it's the right place for it from a request routing perspective.
+router.include_router(call_router)
+15. app/database.py
+
+"""
+Database configuration for the TextNow Clone application.
+"""
+
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from .config import settings  # Import settings
+
+SQLALCHEMY_DATABASE_URL = settings.DATABASE_URL
+
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+16. Dockerfile
+
+FROM python:3.9-slim-buster
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+17. docker-compose.yml
+
+version: "3.9"
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: "sqlite:///./textnow.db"  # Or your PostgreSQL URL
+      SECRET_KEY: "YOUR_SECRET_KEY"  # Change this
+      TWILIO_ACCOUNT_SID: ""
+      TWILIO_AUTH_TOKEN: ""
+      TWILIO_PHONE_NUMBER: ""
+      BASE_URL: "http://localhost:8000" #Important for the call endpoint
+    depends_on:
+      #db:  #Uncomment if you use a separate database container.  Adjust settings accordingly.
+      #  condition: service_healthy
+
+  #db:  #Uncomment this entire section if you want to use a separate database container
+  #  image: postgres:14
+  #  restart: always
+  #  environment:
+  #    POSTGRES_USER: textnow
+  #    POSTGRES_PASSWORD: password
+  #    POSTGRES_DB: textnow_db
+  #  ports:
+  #    - "5432:5432"
+  #  healthcheck:
+  #      test: ["CMD-SHELL", "pg_isready -U textnow
